@@ -130,8 +130,8 @@ export const AGENT_PHASE_MAP: Readonly<Record<AgentName, PhaseName>> = Object.fr
 // The analysis_deliverable.md is rendered via the writeDeliverable hook, which
 // AgentExecutionService runs after validateAgentOutput but before the success
 // commit — so a "both files exist" check here would race the renderer. The
-// validator only checks queue.json, written by the SDK structured-output path
-// in agent-execution.ts before this validator runs.
+// validator only checks queue.json, written by the submit-tool path in
+// agent-execution.ts before this validator runs.
 function createVulnValidator(vulnType: VulnType): AgentValidator {
   return async (sourceDir: string, logger: ActivityLogger): Promise<boolean> => {
     const queueFile = path.join(sourceDir, `${vulnType}_exploitation_queue.json`);

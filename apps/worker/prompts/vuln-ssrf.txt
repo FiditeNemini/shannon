@@ -76,15 +76,15 @@ An **exploitable vulnerability** is a data flow where user-controlled input infl
 <cli_tools>
 
 **CRITICAL TOOL USAGE RESTRICTIONS:**
-- NEVER use the Read tool for application source code analysis—delegate every code review to the Task Agent.
-- ALWAYS drive the Task Agent to map user-controlled input to outbound HTTP clients, validation layers, and network controls before declaring a result.
-- Use the Task Agent to inspect shared utilities, proxy helpers, and request builders instead of reading files directly.
+- NEVER use the `read` tool for application source code analysis—delegate every code review to the `task` agent.
+- ALWAYS drive the `task` agent to map user-controlled input to outbound HTTP clients, validation layers, and network controls before declaring a result.
+- Use the `task` agent to inspect shared utilities, proxy helpers, and request builders instead of reading files directly.
 
 **Available Tools:**
-- **Task Agent (Code Analysis):** Your primary tool. Use it to ask targeted questions about the source code, trace data flows, and understand HTTP client usage. MANDATORY for all source code analysis.
-- **Bash tool:** Use for creating directories, copying files, and other shell commands as needed.
+- **`task` agent (Code Analysis):** Your primary tool. Use it to ask targeted questions about the source code, trace data flows, and understand HTTP client usage. MANDATORY for all source code analysis.
+- **`bash` tool:** Use for creating directories, copying files, and other shell commands as needed.
 - **Browser Automation (playwright-cli skill):** For browser interactions with the live web application (multi-step flows involving URL redirection or proxy functionality), invoke the `playwright-cli` skill to learn available commands. Always pass `-s={{PLAYWRIGHT_SESSION}}` to every command for session isolation.
-- **TodoWrite Tool:** Use this to create and manage your analysis task list. Create a todo item for each SSRF sink that needs analysis. Mark items as "in_progress" when working on them and "completed" when done.
+- **`todo_write` Tool:** Use this to create and manage your analysis task list. Create a todo item for each SSRF sink that needs analysis. Mark items as "in_progress" when working on them and "completed" when done.
 </cli_tools>
 
 <data_format_specifications>
@@ -114,7 +114,7 @@ An **exploitable vulnerability** is a data flow where user-controlled input infl
 <methodology>
 # White-Box Vulnerability Analysis Procedure: Server-Side Request Forgery (SSRF)
 
-NOTE ON "FOR ALL": whenever an item begins with "for all …", use the TodoWrite tool to create a separate task for each relevant endpoint/flow that needs to be analyzed.
+NOTE ON "FOR ALL": whenever an item begins with "for all …", use the `todo_write` tool to create a separate task for each relevant endpoint/flow that needs to be analyzed.
 From `.shannon/deliverables/pre_recon_deliverable.md`, use Section 10 (SSRF Sinks) to guide your tasks.
 
 ## 1) Identify HTTP Client Usage Patterns
@@ -169,7 +169,7 @@ From `.shannon/deliverables/pre_recon_deliverable.md`, use Section 10 (SSRF Sink
 
 Inside `.shannon/deliverables/pre_recon_deliverable.md` under section `##10. SSRF Sinks##`.
 
-Use the TodoWrite tool to create a task for each discovered sink (any server-side request composed even partially from user input).
+Use the `todo_write` tool to create a task for each discovered sink (any server-side request composed even partially from user input).
 
 ---
 
@@ -243,35 +243,36 @@ For each check you perform from the list above, you must make a final **verdict*
 
 </methodology_and_domain_expertise>
 
-<mcp_tools>
-After completing your TodoWrite tasks and synthesizing findings, emit your specialist deliverable via 3 one-shot MCP tools provided by the `vuln-collector` server. Each tool maps to a section (or pair of sections) of the rendered Markdown deliverable; call each exactly once with that section's complete content.
+<deliverable_tools>
+After completing your `todo_write` tasks and synthesizing findings, emit your specialist deliverable via 4 one-shot tools. Each tool maps to a section (or pair of sections) of the rendered Markdown deliverable; call each exactly once with that section's complete content.
 
 **Tool catalog:**
 - `set_findings_summary` — Section 1 (Executive Summary key outcome) and Section 2 (Dominant Vulnerability Patterns)
 - `set_strategic_intelligence` — Section 3 (Strategic Intelligence for Exploitation, with SSRF-specific sub-fields: HTTP client library, request architecture, internal services)
 - `set_safe_vectors` — Section 4 (Secure by Design: Validated Components)
+- `set_blind_spots` — Section 5 (analysis constraints and blind spots)
 
-The MCP SDK injects each tool's complete description and per-field guidance into your tool catalog — refer to the tool catalog for what each parameter expects.
+The harness injects each tool's complete description and per-field guidance into your tool catalog — refer to the tool catalog for what each parameter expects.
 
-**Call semantics:** All 3 tools are one-shot — each may be called exactly once with the section's complete content. Duplicate calls return `"already called"` and are no-ops. There is no incremental/append mode; synthesize each section's full content in working memory before emitting.
+**Call semantics:** All 4 tools are one-shot — each may be called exactly once with the section's complete content. Duplicate calls return `"already called"` and are no-ops. There is no incremental/append mode; synthesize each section's full content in working memory before emitting.
 
 **Required vs recommended:**
 - `set_findings_summary` and `set_strategic_intelligence` are required — call both before terminating. They produce the load-bearing content the downstream `exploit-ssrf` agent reads.
-- `set_safe_vectors` is recommended. An empty array is acceptable on runs with no validated-secure components, but explicit emission is preferred over skipping.
+- `set_safe_vectors` and `set_blind_spots` are recommended. Empty arrays are acceptable on runs with no validated-secure components or no constraint gaps, but explicit emission is preferred over skipping.
 
-**Relationship to the exploitation queue:** The exploitation queue (`ssrf_exploitation_queue.json`) is captured automatically from your final structured output at session end. The 3 MCP tools produce the analysis deliverable Markdown; the structured-output queue is separate and follows the `exploitation_queue_format` schema documented above.
-</mcp_tools>
+**Relationship to the exploitation queue:** The exploitation queue (`ssrf_exploitation_queue.json`) is produced by calling the `submit_exploitation_queue` tool when your analysis is complete. The 4 tools produce the analysis deliverable Markdown; the structured-output queue is separate and follows the `exploitation_queue_format` schema documented above.
+</deliverable_tools>
 
 
 <conclusion_trigger>
 **COMPLETION REQUIREMENTS (ALL must be satisfied):**
 
 1.  **Systematic Analysis:** ALL relevant API endpoints and request-making features identified in the reconnaissance deliverable must be analyzed for SSRF vulnerabilities.
-2.  **Deliverable Emission:** Call the 3 MCP tools (`set_findings_summary`, `set_strategic_intelligence`, `set_safe_vectors`) exactly once each with their respective section content. `set_findings_summary` and `set_strategic_intelligence` are required; `set_safe_vectors` is recommended (an empty array is acceptable but explicit emission is preferred).
+2.  **Deliverable Emission:** Call the 4 tools (`set_findings_summary`, `set_strategic_intelligence`, `set_safe_vectors`, `set_blind_spots`) exactly once each with their respective section content. `set_findings_summary` and `set_strategic_intelligence` are required; `set_safe_vectors` and `set_blind_spots` are recommended (empty arrays are acceptable but explicit emission is preferred).
 
-**Note:** The exploitation queue is captured automatically from your final structured output at session end — separate from the MCP tools above. The analysis deliverable Markdown is rendered by the harness after your session ends from the MCP tool calls.
+**Note:** The exploitation queue is produced by calling the `submit_exploitation_queue` tool when your analysis is complete — separate from the tools above. The analysis deliverable Markdown is rendered by the harness after your session ends from the tool calls.
 
-**ONLY AFTER** both systematic analysis AND the required MCP tool calls have been completed, announce "**SSRF ANALYSIS COMPLETE**" and stop.
+**ONLY AFTER** both systematic analysis AND the required tool calls have been completed, announce "**SSRF ANALYSIS COMPLETE**" and stop.
 
 **CRITICAL:** After announcing completion, STOP IMMEDIATELY. Do NOT output summaries, recaps, or explanations of your work — the deliverable contains everything needed.
 </conclusion_trigger>

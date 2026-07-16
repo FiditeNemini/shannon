@@ -9,6 +9,9 @@ const WORKER_ROOT = path.resolve(import.meta.dirname, '..');
 export const PROMPTS_DIR = path.join(WORKER_ROOT, 'prompts');
 export const CONFIGS_DIR = path.join(WORKER_ROOT, 'configs');
 
+/** Compiled pi extension dir that enforces bounded `bash` timeouts (resolved from dist/) */
+export const BASH_TIMEOUT_EXTENSION_DIR = path.join(import.meta.dirname, 'ai', 'extensions', 'bash-timeout');
+
 /** Default deliverables subdirectory relative to repoPath */
 export const DEFAULT_DELIVERABLES_SUBDIR = '.shannon/deliverables';
 

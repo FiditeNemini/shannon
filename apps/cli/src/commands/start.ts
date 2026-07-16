@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ensureImage, ensureInfra, randomSuffix, spawnWorker } from '../docker.js';
 import { buildEnvFlags, loadEnv, validateCredentials } from '../env.js';
-import { getCredentialsPath, getWorkspacesDir, initHome } from '../home.js';
+import { getWorkspacesDir, initHome } from '../home.js';
 import { isLocal } from '../mode.js';
 import { FINAL_REPORT_FILENAME, INTERNAL_DIR, resolveConfig, resolveRepo, resolveRunFile } from '../paths.js';
 import { displaySplash } from '../splash.js';
@@ -107,13 +107,6 @@ export async function start(args: StartArgs): Promise<void> {
   }
   fs.mkdirSync(path.join(repo.hostPath, '.playwright'), { recursive: true });
 
-  const credentialsPath = getCredentialsPath();
-  const hasCredentials = fs.existsSync(credentialsPath);
-
-  if (hasCredentials) {
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/app/credentials/google-sa-key.json';
-  }
-
   // 10. Resolve output directory
   const outputDir = args.output ? path.resolve(args.output) : undefined;
   if (outputDir) {
@@ -136,7 +129,6 @@ export async function start(args: StartArgs): Promise<void> {
     containerName,
     envFlags: buildEnvFlags(),
     ...(config && { config }),
-    ...(hasCredentials && { credentials: credentialsPath }),
     ...(promptsDir && { promptsDir }),
     ...(outputDir && { outputDir }),
     workspace,

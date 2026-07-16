@@ -18,14 +18,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ApplicationFailure, Context, heartbeat } from '@temporalio/activity';
+import { syncPermissionSystemConfig } from '../ai/pi/permission-system.js';
 import { writePlaywrightStealthConfig } from '../ai/playwright-config-writer.js';
-import { writeUserSettingsForCodePathAvoids } from '../ai/settings-writer.js';
 import { AuditSession } from '../audit/index.js';
 import type { ResumeAttempt } from '../audit/metrics-tracker.js';
 import { authStateFile, generateAuditPath, generateSessionJsonPath, type SessionMetadata } from '../audit/utils.js';
 import type { WorkflowSummary } from '../audit/workflow-logger.js';
 import type { CheckpointContext } from '../interfaces/checkpoint-provider.js';
 import { DEFAULT_DELIVERABLES_SUBDIR, deliverablesDir, resolveSessionJsonPath } from '../paths.js';
+import { getAgentGitPaths } from '../services/agent-git-paths.js';
 import { getContainer, getOrCreateContainer, removeContainer } from '../services/container.js';
 import { classifyErrorForTemporal, PentestError } from '../services/error-handling.js';
 import { ExploitationCheckerService } from '../services/exploitation-checker.js';
@@ -38,7 +39,7 @@ import { validateAuthentication } from '../services/validate-authentication.js';
 import { AGENTS } from '../session-manager.js';
 import type { AgentName } from '../types/agents.js';
 import { ALL_AGENTS } from '../types/agents.js';
-import type { ContainerConfig, ProviderConfig, VulnClass } from '../types/config.js';
+import type { ContainerConfig, VulnClass } from '../types/config.js';
 import { ErrorCode } from '../types/errors.js';
 import { isErr } from '../types/result.js';
 import { atomicWrite, fileExists, readJson } from '../utils/file-io.js';
@@ -58,7 +59,7 @@ const HEARTBEAT_INTERVAL_MS = 2000;
  * Input for all agent activities.
  *
  * Config fields are optional with sensible defaults. When provided, they
- * flow through to getOrCreateContainer() for path and credential configuration.
+ * flow through to getOrCreateContainer() for path configuration.
  */
 export interface ActivityInput {
   webUrl: string;
@@ -71,12 +72,10 @@ export interface ActivityInput {
 
   // Config fields — serializable, read by getOrCreateContainer()
   configYAML?: string;
-  apiKey?: string;
   deliverablesSubdir?: string;
   auditDir?: string;
   promptDir?: string;
   sastSarifPath?: string;
-  providerConfig?: ProviderConfig;
 }
 
 /**
@@ -118,9 +117,7 @@ function buildContainerConfig(input: ActivityInput): ContainerConfig {
   return {
     deliverablesSubdir: input.deliverablesSubdir ?? DEFAULT_DELIVERABLES_SUBDIR,
     auditDir: input.auditDir ?? './workspaces',
-    ...(input.apiKey !== undefined && { apiKey: input.apiKey }),
     ...(input.promptDir !== undefined && { promptDir: input.promptDir }),
-    ...(input.providerConfig !== undefined && { providerConfig: input.providerConfig }),
   };
 }
 
@@ -136,7 +133,7 @@ function buildContainerConfig(input: ActivityInput): ContainerConfig {
 async function runAgentActivity(
   agentName: AgentName,
   input: ActivityInput,
-  mcpServers?: Record<string, import('@anthropic-ai/claude-agent-sdk').McpServerConfig>,
+  customTools?: import('@earendil-works/pi-coding-agent').ToolDefinition[],
   writeDeliverable?: (deliverablesPath: string) => Promise<void>,
 ): Promise<AgentMetrics> {
   const { repoPath, configPath, pipelineTestingMode = false, workflowId, webUrl } = input;
@@ -188,12 +185,11 @@ async function runAgentActivity(
         configPath,
         pipelineTestingMode,
         attemptNumber,
-        ...(input.apiKey !== undefined && { apiKey: input.apiKey }),
-        ...(input.providerConfig !== undefined && { providerConfig: input.providerConfig }),
         ...(input.promptDir !== undefined && { promptDir: input.promptDir }),
         ...(input.configYAML !== undefined && { configYAML: input.configYAML }),
-        ...(mcpServers && { mcpServers }),
+        ...(customTools && { customTools }),
         ...(writeDeliverable && { writeDeliverable }),
+        cancellationSignal: Context.current().cancellationSignal,
       },
       auditSession,
       logger,
@@ -253,10 +249,10 @@ async function runAgentActivity(
 }
 
 export async function runPreReconAgent(input: ActivityInput): Promise<AgentMetrics> {
-  const { createPreReconCollectorServer } = await import('../mcp-server/pre-recon-collector.js');
+  const { createPreReconCollector } = await import('../collectors/pre-recon-collector.js');
   const { renderPreRecon } = await import('../services/pre-recon-renderer.js');
 
-  const collector = createPreReconCollectorServer();
+  const collector = createPreReconCollector();
 
   const writeDeliverable = async (deliverablesPath: string): Promise<void> => {
     const logger = createActivityLogger();
@@ -271,14 +267,14 @@ export async function runPreReconAgent(input: ActivityInput): Promise<AgentMetri
     logger.info(`Wrote pre_recon_deliverable.md from structured data (${markdown.length} bytes)`);
   };
 
-  return runAgentActivity('pre-recon', input, { 'pre-recon-collector': collector.server }, writeDeliverable);
+  return runAgentActivity('pre-recon', input, collector.tools, writeDeliverable);
 }
 
 export async function runReconAgent(input: ActivityInput): Promise<AgentMetrics> {
-  const { createReconCollectorServer } = await import('../mcp-server/recon-collector.js');
+  const { createReconCollector } = await import('../collectors/recon-collector.js');
   const { renderRecon } = await import('../services/recon-renderer.js');
 
-  const collector = createReconCollectorServer();
+  const collector = createReconCollector();
 
   const writeDeliverable = async (deliverablesPath: string): Promise<void> => {
     const logger = createActivityLogger();
@@ -293,7 +289,7 @@ export async function runReconAgent(input: ActivityInput): Promise<AgentMetrics>
     logger.info(`Wrote recon_deliverable.md from structured data (${markdown.length} bytes)`);
   };
 
-  return runAgentActivity('recon', input, { 'recon-collector': collector.server }, writeDeliverable);
+  return runAgentActivity('recon', input, collector.tools, writeDeliverable);
 }
 
 async function runVulnAgentWithCollector(
@@ -301,7 +297,7 @@ async function runVulnAgentWithCollector(
   vulnClass: 'injection' | 'xss' | 'auth' | 'ssrf' | 'authz',
   input: ActivityInput,
 ): Promise<AgentMetrics> {
-  const { createVulnCollector } = await import('../mcp-server/vuln-collector.js');
+  const { createVulnCollector } = await import('../collectors/vuln-collector.js');
   const { renderVulnDeliverable } = await import('../services/vuln-renderer.js');
 
   const collector = createVulnCollector(vulnClass);
@@ -319,7 +315,7 @@ async function runVulnAgentWithCollector(
     logger.info(`Wrote ${vulnClass}_analysis_deliverable.md from structured data (${markdown.length} bytes)`);
   };
 
-  return runAgentActivity(agentName, input, { 'vuln-collector': collector.server }, writeDeliverable);
+  return runAgentActivity(agentName, input, collector.tools, writeDeliverable);
 }
 
 export async function runInjectionVulnAgent(input: ActivityInput): Promise<AgentMetrics> {
@@ -357,7 +353,19 @@ async function readExploitQueue(queuePath: string): Promise<{ validIds: Set<stri
   if (!(await fileExists(queuePath))) {
     return { validIds, idToType };
   }
-  const doc = await readJson<ExploitQueueDocument>(queuePath);
+  let doc: ExploitQueueDocument;
+  try {
+    doc = await readJson<ExploitQueueDocument>(queuePath);
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const failure = ApplicationFailure.nonRetryable(
+      truncateErrorMessage(`Invalid exploitation queue ${queuePath}: ${rawMessage}`),
+      'InvalidExploitationQueueError',
+      [{ queuePath }],
+    );
+    truncateStackTrace(failure);
+    throw failure;
+  }
   for (const entry of doc.vulnerabilities ?? []) {
     if (!entry.ID) continue;
     validIds.add(entry.ID);
@@ -371,7 +379,7 @@ async function runExploitAgentWithCollector(
   vulnClass: 'injection' | 'xss' | 'auth' | 'ssrf' | 'authz',
   input: ActivityInput,
 ): Promise<AgentMetrics> {
-  const { createExploitCollector } = await import('../mcp-server/exploit-collector.js');
+  const { createExploitCollector } = await import('../collectors/exploit-collector.js');
   const { renderExploitDeliverable } = await import('../services/exploit-renderer.js');
 
   const dir = deliverablesDir(input.repoPath, input.deliverablesSubdir);
@@ -401,7 +409,7 @@ async function runExploitAgentWithCollector(
     logger.info(`Wrote ${vulnClass}_exploitation_evidence.md from structured data (${markdown.length} bytes)`);
   };
 
-  return runAgentActivity(agentName, input, { 'exploit-collector': collector.server }, writeDeliverable);
+  return runAgentActivity(agentName, input, collector.tools, writeDeliverable);
 }
 
 export async function runInjectionExploitAgent(input: ActivityInput): Promise<AgentMetrics> {
@@ -434,10 +442,10 @@ export async function runReportAgent(input: ActivityInput): Promise<AgentMetrics
  * Runs cheap checks before any agent execution:
  * 1. Repository path exists and is a directory
  * 2. Config file validates (if provided)
- * 3. Credential validation (API key, OAuth, Bedrock, or Vertex AI)
+ * 3. Credential validation (API key, OAuth, or Bedrock)
  * 4. Target URL reachable from the container
  *
- * NOT using runAgentActivity — preflight doesn't run an agent via the SDK.
+ * NOT using runAgentActivity — preflight doesn't run a full analysis agent.
  */
 export async function runPreflightValidation(input: ActivityInput): Promise<void> {
   const startTime = Date.now();
@@ -452,14 +460,7 @@ export async function runPreflightValidation(input: ActivityInput): Promise<void
     const logger = createActivityLogger();
     logger.info('Running preflight validation...', { attempt: attemptNumber });
 
-    const result = await runPreflightChecks(
-      input.webUrl,
-      input.repoPath,
-      input.configPath,
-      logger,
-      input.apiKey,
-      input.providerConfig,
-    );
+    const result = await runPreflightChecks(input.webUrl, input.repoPath, input.configPath, logger);
 
     if (isErr(result)) {
       const classified = classifyErrorForTemporal(result.error);
@@ -544,11 +545,10 @@ export async function runAuthenticationValidation(input: ActivityInput): Promise
       logger,
       auditSession,
       attemptNumber,
-      ...(input.apiKey !== undefined && { apiKey: input.apiKey }),
-      ...(input.providerConfig !== undefined && { providerConfig: input.providerConfig }),
       ...(input.deliverablesSubdir !== undefined && { deliverablesSubdir: input.deliverablesSubdir }),
       ...(input.promptDir !== undefined && { promptDir: input.promptDir }),
       ...(input.pipelineTestingMode !== undefined && { pipelineTestingMode: input.pipelineTestingMode }),
+      cancellationSignal: Context.current().cancellationSignal,
     });
 
     if (isErr(result)) {
@@ -635,12 +635,13 @@ export async function syncPlaywrightStealthConfig(input: ActivityInput): Promise
 }
 
 /**
- * Sync code_path avoid rules into Claude's user-scope settings.json so the
- * SDK enforces them at the tool layer for every agent in this run.
+ * Sync code_path avoid rules into the @gotgenes/pi-permission-system global config
+ * so pi enforces them at the tool layer for every agent in this run. The executor
+ * loads the extension when this config is present (see pi-executor).
  *
- * Runs once per workflow before any agent fires. Config is fixed for the
- * lifetime of the workflow, so writing once avoids the parallel-agent race
- * on the global ~/.claude/settings.json file.
+ * Runs once per workflow before any analysis agent fires. Config is fixed for the
+ * lifetime of the workflow, so writing once avoids a parallel-agent race on the
+ * global config file.
  */
 export async function syncCodePathDenyRules(input: ActivityInput): Promise<void> {
   const logger = createActivityLogger();
@@ -654,8 +655,12 @@ export async function syncCodePathDenyRules(input: ActivityInput): Promise<void>
 
   const config = configResult.value;
   const denyCount = (config?.avoid ?? []).filter((r) => r.type === 'code_path').length;
-  await writeUserSettingsForCodePathAvoids(config);
-  logger.info(`Synced code_path deny rules to user settings (${denyCount} entries)`);
+  syncPermissionSystemConfig(config);
+  logger.info(
+    denyCount > 0
+      ? `Synced ${denyCount} code_path deny rule(s) to the pi-permission-system config`
+      : 'No code_path deny rules; pi-permission-system config cleared',
+  );
 }
 
 /**
@@ -719,7 +724,29 @@ export async function checkExploitationQueue(input: ActivityInput, vulnType: Vul
 
   // Pass deliverablesPath (not repoPath) — validators expect the deliverables directory
   const delivPath = deliverablesDir(repoPath, input.deliverablesSubdir);
-  return checker.checkQueue(vulnType, delivPath, logger);
+  try {
+    return await checker.checkQueue(vulnType, delivPath, logger);
+  } catch (error) {
+    const classified = classifyErrorForTemporal(error);
+    const message = truncateErrorMessage(error instanceof Error ? error.message : String(error));
+    const details = [{ phase: 'check-exploitation-queue', vulnType }];
+    const queueValidationFailure = error instanceof PentestError && error.type === 'validation';
+    // A code-less PentestError (e.g. a filesystem read failure) is classified by
+    // string-matching, which can miss its retryable flag. Trust the flag directly so
+    // a non-retryable error never gets a Temporal retry.
+    const pentestNonRetryable = error instanceof PentestError && !error.retryable;
+
+    const failure =
+      queueValidationFailure || pentestNonRetryable || !classified.retryable
+        ? ApplicationFailure.nonRetryable(
+            message,
+            queueValidationFailure ? 'InvalidExploitationQueueError' : classified.type,
+            details,
+          )
+        : ApplicationFailure.create({ message, type: classified.type, details });
+    truncateStackTrace(failure);
+    throw failure;
+  }
 }
 
 interface RunScope {
@@ -863,7 +890,16 @@ export async function persistOrValidateRunScope(
   await auditSession.initialize(input.workflowId);
 
   const sessionPath = generateSessionJsonPath(sessionMetadata);
-  const session = await readJson<SessionJson>(sessionPath);
+  let session: SessionJson;
+  try {
+    session = await readJson<SessionJson>(sessionPath);
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    throw ApplicationFailure.nonRetryable(
+      `Corrupted session.json in workspace ${input.sessionId}: ${rawMessage}`,
+      'CorruptedSessionError',
+    );
+  }
 
   if (session.session.scope) {
     const recorded = session.session.scope;
@@ -926,11 +962,12 @@ export async function restoreGitCheckpoint(
   const logger = createActivityLogger();
   logger.info(`Restoring deliverables to ${checkpointHash}...`);
 
-  // Validate hash exists in this clone before attempting reset
+  // Validate the hash exists in the deliverables clone (the repo actually being
+  // reset below) before attempting reset.
   try {
     await executeGitCommandWithRetry(
-      ['git', 'rev-parse', '--verify', checkpointHash],
-      repoPath,
+      ['git', 'cat-file', '-e', `${checkpointHash}^{commit}`],
+      deliverablesPath,
       'verify checkpoint hash exists',
     );
   } catch {
@@ -943,7 +980,13 @@ export async function restoreGitCheckpoint(
     deliverablesPath,
     'reset deliverables to checkpoint',
   );
-  await executeGitCommandWithRetry(['git', 'clean', '-fd'], deliverablesPath, 'clean untracked deliverables');
+
+  // Scope the untracked clean so a completed agent's deliverables survive: exclude every
+  // completed agent's paths, cleaning only leftovers from the incomplete agents being re-run.
+  const incompleteSet = new Set<AgentName>(incompleteAgents);
+  const completedPaths = ALL_AGENTS.filter((name) => !incompleteSet.has(name)).flatMap(getAgentGitPaths);
+  const cleanArgs = ['git', 'clean', '-fd', ...completedPaths.flatMap((completedPath) => ['-e', completedPath])];
+  await executeGitCommandWithRetry(cleanArgs, deliverablesPath, 'clean untracked deliverables');
 
   // Explicitly delete partial deliverables for incomplete agents
   for (const agentName of incompleteAgents) {
@@ -1056,8 +1099,9 @@ export async function logWorkflowComplete(input: ActivityInput, summary: Workflo
   await auditSession.logWorkflowComplete(cumulativeSummary);
 
   // 6. Surface the final report at the run root. Done here (not in the report phase)
-  // so it also runs when a resume skips an already-complete report phase.
-  if (summary.status === 'completed') {
+  // so it also runs when a resume skips an already-complete report phase. A partial
+  // run still assembles a report (only some classes were not assessed), so surface it too.
+  if (summary.status === 'completed' || summary.status === 'partial') {
     try {
       await copyReportToRunRoot(
         input.repoPath,
